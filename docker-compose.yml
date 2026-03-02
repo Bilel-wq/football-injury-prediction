@@ -19,10 +19,13 @@ services:
     container_name: football_backend
     ports:
       - "8000:8000"
-    environment:
+        environment:
       - DATABASE_URL=postgresql://postgres:football_pass@db:5432/football_db
+      - MODEL_PATH=./model.h5
     depends_on:
       - db
+    volumes:
+      - backend_data:/app
     restart: unless-stopped
 
   frontend:
