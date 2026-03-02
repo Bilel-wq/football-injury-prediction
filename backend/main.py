@@ -10,6 +10,8 @@ import random
 import uuid
 import os
 
+from model_loader import predict_risk
+
 # Database setup
 DATABASE_URL = "sqlite:///./football.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -82,6 +84,7 @@ class SkeletonSchema(BaseModel):
 class PredictRequest(BaseModel):
     player_id: int
     keypoint_sequence: List[dict]
+    player_stats: Optional[dict] = None
 
 class PredictResponse(BaseModel):
     player_id: int
@@ -244,7 +247,7 @@ def get_task_status(task_id: str):
 
 @app.post("/api/predict", response_model=PredictResponse)
 def predict(request: PredictRequest):
-    risk_score = round(random.uniform(0, 100), 1)
+    risk_score = predict_risk(request.keypoint_sequence, player_stats=request.player_stats)
     if risk_score < 30:
         risk_level = "faible"
     elif risk_score < 60:

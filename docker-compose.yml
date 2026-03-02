@@ -8,6 +8,7 @@ services:
       - "8000:8000"
     environment:
       - DATABASE_URL=sqlite:///./football.db
+      - MODEL_PATH=./model.h5
     volumes:
       - backend_data:/app
     restart: unless-stopped
