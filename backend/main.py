@@ -1,20 +1,30 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, timedelta
+from passlib.context import CryptContext
+from jose import JWTError, jwt
 import random
 import uuid
 import os
+import string
 
 # Database setup
-DATABASE_URL = "sqlite:///./football.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:football_pass@localhost:5432/football_db")
+engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+# Security setup
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+SECRET_KEY = os.getenv("SECRET_KEY", "football-secret-key-2024")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 
 # Models
 class PlayerDB(Base):
@@ -46,6 +56,24 @@ class KeypointDataDB(Base):
     player_id = Column(Integer, ForeignKey("players.id"))
     frame = Column(Integer)
     keypoints = Column(JSON)
+
+class UserDB(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, nullable=False)
+    email = Column(String, unique=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    role = Column(String, default="admin")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class PlayerAccountDB(Base):
+    __tablename__ = "player_accounts"
+    id = Column(Integer, primary_key=True, index=True)
+    player_id = Column(Integer, ForeignKey("players.id"), unique=True, nullable=False)
+    login_id = Column(String, unique=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    plain_password = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 Base.metadata.create_all(bind=engine)
 
@@ -87,6 +115,42 @@ class PredictResponse(BaseModel):
     player_id: int
     risk_score: float
     risk_level: str
+
+class AdminRegister(BaseModel):
+    username: str
+    email: str
+    password: str
+
+class AdminLogin(BaseModel):
+    username: str
+    password: str
+
+class AdminResponse(BaseModel):
+    id: int
+    username: str
+    email: str
+    role: str
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+    user: AdminResponse
+
+class AddPlayerRequest(BaseModel):
+    name: str
+    number: int
+    position: str
+    image_url: Optional[str] = None
+
+class PlayerAccountResponse(BaseModel):
+    player_id: int
+    player_name: str
+    login_id: str
+    plain_password: str
+    message: str
 
 # Seed data
 PLAYERS_DATA = [
@@ -183,7 +247,34 @@ def get_db():
     finally:
         db.close()
 
-from fastapi import Depends
+def generate_player_login_id(db: Session) -> str:
+    count = db.query(PlayerAccountDB).count()
+    return f"PLY-{str(count + 1).zfill(5)}"
+
+def generate_player_password(length: int = 10) -> str:
+    chars = string.ascii_letters + string.digits
+    return ''.join(random.choices(chars, k=length))
+
+def create_access_token(data: dict) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if not username:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user = db.query(UserDB).filter(UserDB.username == username).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        return user
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 @app.get("/api/players", response_model=List[PlayerSchema])
 def get_players(db: Session = Depends(get_db)):
@@ -256,3 +347,91 @@ def predict(request: PredictRequest):
 @app.get("/")
 def root():
     return {"message": "Football Injury Prediction API", "docs": "/docs"}
+
+# Admin Registration
+@app.post("/auth/register", response_model=AdminResponse)
+def register(user: AdminRegister, db: Session = Depends(get_db)):
+    existing = db.query(UserDB).filter(
+        (UserDB.username == user.username) | (UserDB.email == user.email)
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Username or email already exists")
+    hashed = pwd_context.hash(user.password)
+    new_user = UserDB(username=user.username, email=user.email, hashed_password=hashed, role="admin")
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+# Admin Login
+@app.post("/auth/login", response_model=TokenResponse)
+def login(user: AdminLogin, db: Session = Depends(get_db)):
+    db_user = db.query(UserDB).filter(UserDB.username == user.username).first()
+    if not db_user or not pwd_context.verify(user.password, db_user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    token = create_access_token({"sub": db_user.username})
+    return {"access_token": token, "token_type": "bearer", "user": db_user}
+
+# Get current admin info
+@app.get("/auth/me", response_model=AdminResponse)
+def get_me(current_user: UserDB = Depends(get_current_user)):
+    return current_user
+
+# Admin adds a player (player gets auto login_id + password)
+@app.post("/admin/add-player", response_model=PlayerAccountResponse)
+def add_player(
+    player_data: AddPlayerRequest,
+    current_user: UserDB = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    image_url = player_data.image_url or f"https://ui-avatars.com/api/?name={player_data.name.replace(' ', '+')}&background=0D8ABC&color=fff&size=100"
+    new_player = PlayerDB(
+        name=player_data.name,
+        number=player_data.number,
+        position=player_data.position,
+        image_url=image_url
+    )
+    db.add(new_player)
+    db.commit()
+    db.refresh(new_player)
+
+    login_id = generate_player_login_id(db)
+    plain_password = generate_player_password()
+    hashed_password = pwd_context.hash(plain_password)
+
+    player_account = PlayerAccountDB(
+        player_id=new_player.id,
+        login_id=login_id,
+        hashed_password=hashed_password,
+        plain_password=plain_password
+    )
+    db.add(player_account)
+    db.commit()
+
+    return {
+        "player_id": new_player.id,
+        "player_name": new_player.name,
+        "login_id": login_id,
+        "plain_password": plain_password,
+        "message": f"Player {new_player.name} added successfully! Share these credentials with the player."
+    }
+
+# Get all player accounts (admin only)
+@app.get("/admin/player-accounts")
+def get_player_accounts(
+    current_user: UserDB = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    accounts = db.query(PlayerAccountDB, PlayerDB).join(
+        PlayerDB, PlayerAccountDB.player_id == PlayerDB.id
+    ).all()
+    return [
+        {
+            "player_id": acc.PlayerAccountDB.player_id,
+            "player_name": acc.PlayerDB.name,
+            "login_id": acc.PlayerAccountDB.login_id,
+            "plain_password": acc.PlayerAccountDB.plain_password,
+            "created_at": acc.PlayerAccountDB.created_at
+        }
+        for acc in accounts
+    ]

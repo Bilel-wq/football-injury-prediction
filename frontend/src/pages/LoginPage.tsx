@@ -1,16 +1,29 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
+import { authApi } from '../utils/api';
 
 const LoginPage: React.FC = () => {
   const navigate = useNavigate();
   const [role, setRole] = useState<'admin' | 'player'>('admin');
   const [identifiant, setIdentifiant] = useState('');
   const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError('');
     if (role === 'admin') {
-      navigate('/dashboard');
+      setLoading(true);
+      try {
+        const result = await authApi.login({ username: identifiant, password });
+        localStorage.setItem('admin_token', result.access_token);
+        navigate('/admin');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Identifiants invalides');
+      } finally {
+        setLoading(false);
+      }
     } else {
       navigate('/player/1');
     }
@@ -46,7 +59,7 @@ const LoginPage: React.FC = () => {
               style={{ backgroundColor: 'var(--bg-main)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}
             />
           </div>
-          <div className="mb-6">
+          <div className="mb-4">
             <label className="block text-sm mb-2" style={{ color: 'var(--text-muted)' }}>Mot de passe</label>
             <input
               type="password"
@@ -58,14 +71,24 @@ const LoginPage: React.FC = () => {
               style={{ backgroundColor: 'var(--bg-main)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}
             />
           </div>
+          {error && (
+            <p className="text-sm mb-4" style={{ color: '#ef4444' }}>{error}</p>
+          )}
           <button
             type="submit"
-            className="w-full p-3 rounded-lg font-semibold text-white transition-opacity hover:opacity-90"
+            disabled={loading}
+            className="w-full p-3 rounded-lg font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
             style={{ backgroundColor: '#3b82f6' }}
           >
-            Se connecter
+            {loading ? 'Connexion...' : 'Se connecter'}
           </button>
         </form>
+        {role === 'admin' && (
+          <p className="text-center mt-4 text-sm" style={{ color: 'var(--text-muted)' }}>
+            Pas encore de compte ?{' '}
+            <Link to="/register" style={{ color: '#3b82f6' }}>Créer un compte admin</Link>
+          </p>
+        )}
       </div>
     </div>
   );
